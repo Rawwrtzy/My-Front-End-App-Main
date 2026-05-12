@@ -28,6 +28,7 @@ function App() {
   const [activeTab, setActiveTab] = useState("login");
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [currentUser, setCurrentUser] = useState(null);
+  const [authToken, setAuthToken] = useState(null);
 
   // -------------------------
   // LOGIN FORM STATE (CONTROLLED COMPONENT)
@@ -58,11 +59,11 @@ function App() {
   // PATIENT REGISTRATION STATE
   // -------------------------
   const [patient, setPatient] = useState({
-    id: "QC-1023",
-    name: "Juan Dela Cruz",
-    age: 22,
+    id: "",
+    name: "",
+    age: "",
     sex: "Male",
-    contact: "09123456789"
+    contact: ""
   });
   const [patientErrors, setPatientErrors] = useState({});
 
@@ -189,8 +190,23 @@ function App() {
   // ========================
   
   // Replace with your actual token from HTTPie
-  const API_TOKEN = "1dd03836cdd9aa18e6bd1eef24e6ee0e676cc390"; 
+  const API_TOKEN = authToken;
   const API_URL = "http://127.0.0.1:8000/api";
+
+  const refreshAutoId = () => {
+    fetch(`${API_URL}/patients/`, {
+      headers: { "Authorization": `Token ${authToken}` }
+    })
+    .then(res => res.json())
+    .then(data => {
+      if (data.length > 0) {
+        const highestId = Math.max(...data.map(p => parseInt(p.patient_id.replace(/\D/g, '')) || 0));
+        setPatient(prev => ({ ...prev, id: `QC-${highestId + 1}` }));
+      } else {
+        setPatient(prev => ({ ...prev, id: `QC-1001` }));
+      }
+    });
+  };
 
   // Fetch patients when the dashboard loads
 
@@ -204,13 +220,42 @@ function App() {
       })
         .then(response => response.json())
         .then(data => {
-          // Format Django data to match your React component structure
+          // Format Django data, making sure to grab all fields for the View Details button
+          
           const formattedPatients = data.map(p => ({
-            id: p.patient_id, // Map Django patient_id to React id
+            id: p.patient_id,
             name: p.name,
-            registeredAt: "Just now" // We can update this later based on a timestamp
+            age: p.age,
+            sex: p.sex,
+            contact: p.contact,
+            registeredAt: p.registered_at
+              ? new Date(p.registered_at).toLocaleString([], {
+                month: 'short',
+                day: 'numeric',
+                year: 'numeric',
+                hour: '2-digit', 
+                minute: '2-digit',
+                hour12: true
+              })
+              : "Date unknown"
           }));
           setRecentPatients(formattedPatients);
+
+          // Calculate the next ID based on the database
+        // --- COPY AND PASTE THIS EXACTLY HERE ---
+        // --- PUT THIS RIGHT AFTER setRecentPatients(formattedPatients); ---
+        if (data.length > 0) {
+          // Extracts numbers from "QC-XXXX", ignores bad data, finds the highest, adds 1
+          const highestId = Math.max(...data.map(p => {
+            const num = parseInt(p.patient_id.replace(/\D/g, ''));
+            return isNaN(num) ? 0 : num;
+          }));
+          
+          setPatient(prev => ({ ...prev, id: `QC-${highestId + 1}` }));
+        } else {
+          setPatient(prev => ({ ...prev, id: `QC-1001` }));
+        }
+        // ----------------------------------------
         })
         .catch(err => console.error("Error fetching patients:", err));
     }
@@ -218,6 +263,35 @@ function App() {
   // ========================
   // FORM VALIDATION FUNCTIONS
   // ========================
+  useEffect(() => {
+  if (isAuthenticated && currentPage === "users") {
+    fetch(`${API_URL}/users/`, {
+      headers: { 
+        "Authorization": `Token ${API_TOKEN}`,
+        "Content-Type": "application/json"
+      }
+    })
+    .then(res => res.json())
+    .then(data => {
+      const mapped = data.map(u => ({
+        id: u.id,
+        name: u.first_name || u.last_name 
+          ? `${u.first_name || ''} ${u.last_name || ''}`.trim() 
+          : u.username,
+        email: u.email,
+        // isStaff and isActive are the key permissions from Django
+        isStaff: u.is_staff, 
+        isActive: u.is_active,
+        requestedAt: new Date(u.date_joined).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+      }));
+
+      // Filter based on the 'isActive' boolean (is_active in Django)
+      setPendingUsers(mapped.filter(u => !u.isActive));
+      setApprovedUsers(mapped.filter(u => u.isActive));
+    })
+    .catch(err => console.error("User fetch error:", err));
+  }
+}, [isAuthenticated, currentPage]); // Re-runs when you switch to the Users tab
 
   // Validate login form
   const validateLoginForm = () => {
@@ -260,22 +334,37 @@ function App() {
   };
 
   // Validate patient form
+  // Validate patient form (Upgraded with Strict Formatting)
   const validatePatientForm = () => {
     const errors = {};
+    
+    // ID Check
     if (!patient.id) {
       errors.id = "Patient ID is required";
     }
-    if (!patient.name) {
+
+    // Name Check: Only letters, spaces, and standard name punctuation
+    if (!patient.name.trim()) {
       errors.name = "Name is required";
+    } else if (!/^[a-zA-Z\s.,'-]+$/.test(patient.name)) {
+      errors.name = "Name can only contain letters and spaces";
     }
-    if (!patient.age || patient.age < 0 || patient.age > 150) {
-      errors.age = "Age must be between 0 and 150";
+
+    // Age Check: Must be a realistic number
+    const ageNum = parseInt(patient.age);
+    if (patient.age === "" || isNaN(ageNum)) {
+      errors.age = "Age is required";
+    } else if (ageNum < 0 || ageNum > 150) {
+      errors.age = "Please enter a valid age (0-150)";
     }
+
+    // Contact Check: Exactly 11 digits starting with 09
     if (!patient.contact) {
       errors.contact = "Contact is required";
-    } else if (!/^\d{10,11}$/.test(patient.contact.replace(/\D/g, ''))) {
-      errors.contact = "Contact must be 10-11 digits";
+    } else if (!/^09\d{9}$/.test(patient.contact.replace(/\s/g, ''))) {
+      errors.contact = "Must be 11 digits starting with 09 (e.g., 09123456789)";
     }
+
     return errors;
   };
 
@@ -489,32 +578,41 @@ const handleLoginSubmit = (e) => {
   // =========================================================================
   // 🚀 Register new patient via Django API (Task 4 & 7: Send Data)
   // =========================================================================
+  // Register new patient via Django API (Upgraded with Duplicate Check)
   const handleRegisterPatient = (e) => {
     e.preventDefault();
     const errors = validatePatientForm();
     
+    // Check for duplicate patient (Same exact name AND contact)
+    const isDuplicate = recentPatients.some(
+      p => p.name.toLowerCase().trim() === patient.name.toLowerCase().trim() && 
+           p.contact === patient.contact
+    );
+
+    if (isDuplicate) {
+      addNotification("Error: This patient is already registered!");
+      setPatientErrors({ name: "Duplicate entry", contact: "Duplicate entry" });
+      return; // Stop the submission immediately
+    }
+
     if (Object.keys(errors).length === 0) {
       // 1. Send data to Django
       fetch(`${API_URL}/patients/`, {
         method: "POST", 
         headers: {
-          "Authorization": `Token ${API_TOKEN}`,
+          "Authorization": `Token ${authToken}`,
           "Content-Type": "application/json"
         },
         body: JSON.stringify({
           patient_id: patient.id,
           name: patient.name,
           age: parseInt(patient.age),
-          sex: patient.sex,
+          sex: patient.sex || "Male",
           contact: patient.contact
         })
       })
-      .then(async response => {
-        // ERROR CHECKING LOGIC: Handle invalid input or unauthorized access (Task 8)[cite: 1]
+      .then(response => {
         if (!response.ok) {
-          // If Django is mad, grab the exact error message and print it!
-          const errorDetails = await response.json();
-          console.error("🚨 DJANGO REJECTED THIS BECAUSE:", errorDetails);
           throw new Error("Backend rejected the save.");
         }
         return response.json();
@@ -524,26 +622,41 @@ const handleLoginSubmit = (e) => {
         const newPatient = {
           id: patient.id,
           name: patient.name, 
+          age: patient.age,
+          sex: patient.sex,
+          contact: patient.contact,
           registeredAt: new Date().toLocaleTimeString()
         };
         
         setRecentPatients(prev => [newPatient, ...prev]);
-        addNotification(`Patient ${patient.name} registered securely!`); // Display success message[cite: 1]
-        setPatientErrors({});
+        addNotification(`Patient ${patient.name} registered securely!`); 
+        setPatientErrors({}); // Keep this line that you already have
         
-        // 3. Reset form
-        setPatient({
-          id: "", name: "", age: "", sex: "Male", contact: ""
+        // --- COPY AND PASTE THIS EXACTLY BELOW IT ---
+        // --- PUT THIS RIGHT AFTER setPatientErrors({}); ---
+        setPatient(prev => {
+          // Takes the ID that was JUST saved, extracts the number, and adds 1
+          const currentIdNum = parseInt(prev.id.replace(/\D/g, ''));
+          const nextId = `QC-${(isNaN(currentIdNum) ? 1000 : currentIdNum) + 1}`;
+          
+          return {
+            id: nextId, 
+            name: "", 
+            age: "", 
+            sex: "Male", 
+            contact: ""
+          };
         });
+        // --------------------------------------------
       })
       .catch(error => {
         console.error(error);
-        addNotification("Error connecting to backend database! Check Console."); // Display error message[cite: 1]
+        addNotification("Error connecting to backend database!"); 
       });
 
     } else {
       setPatientErrors(errors);
-      addNotification("Please fix the errors in the patient form");
+      addNotification("Please fix the highlighted errors");
     }
   };
 
@@ -601,10 +714,34 @@ const handleLoginSubmit = (e) => {
 
   // Remove patient from recent list
   const handleRemovePatient = (patientId) => {
-    setRecentPatients(prev => prev.filter(p => p.id !== patientId));
-    addNotification("Patient removed from recent list");
-  };
+    // 1. Ask for confirmation so users don't delete by accident
+    if (window.confirm(`Are you sure you want to delete patient ${patientId}?`)) {
+      
+      // 2. Send the DELETE request to Django
+      fetch(`${API_URL}/patients/${patientId}/delete/`, {
+        method: "DELETE",
+        headers: {
+          "Authorization": `Token ${authToken}`,
+          "Content-Type": "application/json"
+        }
+      })
+      .then(response => {
+        if (!response.ok) throw new Error("Failed to delete from database");
+        
+        // 3. If backend success, remove from the React state (the UI)
+        setRecentPatients(prev => prev.filter(p => p.id !== patientId));
+        addNotification("Patient deleted from database.");
 
+        // 4. Recalculate the Auto-ID immediately
+        // This ensures the next registration uses a fresh ID
+        refreshAutoId(); 
+      })
+      .catch(error => {
+        console.error("Delete error:", error);
+        addNotification("Error: Could not delete from server.");
+      });
+    }
+  };
   // Toggle queue status
   const handleToggleQueueStatus = () => {
     const newStatus = queueStatus === "Active" ? "Closed" : "Active";
@@ -683,23 +820,45 @@ const handleLoginSubmit = (e) => {
   // ========================
 
   // Accept pending user
-  const handleAcceptUser = (userId) => {
-    const user = pendingUsers.find(u => u.id === userId);
-    if (user) {
-      setApprovedUsers(prev => [...prev, { ...user, approvedAt: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }), status: "approved" }]);
-      setPendingUsers(prev => prev.filter(u => u.id !== userId));
-      addNotification(`User ${user.name} has been approved!`);
-    }
-  };
+  // APPROVE: Tells Django to set is_active to true
+// APPROVE: Access granted, moves user to "Approved Users" list
+const handleAcceptUser = (userId) => {
+  fetch(`${API_URL}/users/${userId}/approve/`, {
+    method: "PATCH",
+    headers: {
+      "Authorization": `Token ${API_TOKEN}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ is_active: true })
+  })
+  .then(res => {
+    if (!res.ok) throw new Error("Approval failed");
+    addNotification("User approved and granted access.");
+    // This will trigger the useEffect to re-fetch and move the user to Approved
+    setCurrentPage("users"); 
+  })
+  .catch(() => addNotification("Error approving user."));
+};
 
-  // Decline pending user
-  const handleDeclineUser = (userId) => {
-    const user = pendingUsers.find(u => u.id === userId);
-    if (user) {
-      setPendingUsers(prev => prev.filter(u => u.id !== userId));
-      addNotification(`User ${user.name} has been declined`);
-    }
-  };
+// DECLINE & REMOVE: Both delete the user from the database
+const handleRemoveUser = (userId, type = "request") => {
+  const message = type === "request" 
+    ? "Are you sure you want to decline this request?" 
+    : "Are you sure you want to remove this approved user?";
+
+  if (window.confirm(message)) {
+    fetch(`${API_URL}/users/${userId}/`, {
+      method: "DELETE",
+      headers: { "Authorization": `Token ${API_TOKEN}` }
+    })
+    .then(res => {
+      if (!res.ok) throw new Error("Delete failed");
+      addNotification(type === "request" ? "Request declined." : "User removed.");
+      setCurrentPage("users");
+    })
+    .catch(() => addNotification("Error deleting user."));
+  }
+};
 
   // Remove approved user
   const handleRemoveApprovedUser = (userId) => {
@@ -766,12 +925,50 @@ const handleLoginSubmit = (e) => {
   };
 
   // Navigate to patient monitoring with selected patient
-  const handleViewPatient = (patientId) => {
+  // Navigate to the Patient page and display the data
+  // Navigate to the Patient page and display the data
+const handleViewPatient = (patientId) => {
+  // 1. We still find the patient if you need to log it or use it for logic
+  const selected = recentPatients.find(p => p.id === patientId);
+
+  if (selected) {
+    // 2. ONLY set the ID for the View/Monitoring page
+    // This tells the "Patients" tab which person to display
     setSelectedPatientId(patientId);
+
+    // 3. Switch the UI to the Patients tab
     setCurrentPage("patientMonitoring");
-    const patient = recentPatients.find(p => p.id === patientId);
-    if (patient) {
-      addNotification(`Viewing patient: ${patient.name}`);
+
+    setPatient(prev => ({
+      id: prev.id, // Keep the current ID (or auto-ID) intact
+      name: "",
+      age: "",
+      sex: "Male",
+      contact: ""
+    }));
+
+    // ⚠️ CRITICAL: Ensure you do NOT have a line like: setPatient(selected);
+    // Removing that line is what keeps the Registration Form empty.
+  }
+    
+    if (selected) {
+      // 1. Pass the data to the state so the details screen can display it
+      setPatient({
+        id: selected.id,
+        name: selected.name,
+        age: selected.age || "", 
+        sex: selected.sex || "Male",
+        contact: selected.contact || ""
+      });
+      
+      // 2. Tell the system WHICH patient is actively being viewed
+      setSelectedPatientId(patientId);
+      
+      // 3. Switch the tab to the "Patients" (monitoring) screen
+      setCurrentPage("patientMonitoring");
+      
+      addNotification(`Viewing details for ${selected.name}`);
+      window.scrollTo({ top: 0, behavior: 'smooth' });
     }
   };
 
@@ -1023,12 +1220,10 @@ const handleLoginSubmit = (e) => {
                       <label>Patient ID *</label>
                       <input 
                         type="text" 
-                        value={patient.id} 
-                        onChange={(e) => handlePatientChange("id", e.target.value)}
-                        placeholder="e.g., QC-1023" 
-                        className={patientErrors.id ? "input-error" : ""}
+                        value={patient.id || "Loading..."} 
+                        disabled 
+                        style={{ backgroundColor: "#e9ecef", color: "#6c757d", cursor: "not-allowed", fontWeight: "bold" }}
                       />
-                      {patientErrors.id && <span className="error-message">{patientErrors.id}</span>}
                     </div>
 
                     <div className="form-group">
@@ -1935,14 +2130,14 @@ const handleLoginSubmit = (e) => {
                           </div>
                           <div className="user-request-actions">
                             <button 
-                              onClick={() => handleAcceptUser(user.id)}
                               className="btn-accept"
+                              onClick={() => handleAcceptUser(user.id)}
                             >
                               ✓ Accept
                             </button>
                             <button 
-                              onClick={() => handleDeclineUser(user.id)}
                               className="btn-decline"
+                              onClick={() => handleRemoveUser(user.id, "request")}
                             >
                               ✗ Decline
                             </button>
@@ -1971,8 +2166,8 @@ const handleLoginSubmit = (e) => {
                             <span className="status-badge approved">✓ Approved</span>
                             {user.id !== 101 && (
                               <button 
-                                onClick={() => handleRemoveApprovedUser(user.id)}
                                 className="btn-remove-user"
+                                onClick={() => handleRemoveUser(user.id)}
                               >
                                 Remove
                               </button>
